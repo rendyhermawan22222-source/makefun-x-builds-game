@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>USDC STACK — one prompt, one ghost, one tower</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{margin:0;background:#14101a;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:system-ui,sans-serif}
+  canvas{background:#1b1030;border-radius:12px;box-shadow:0 0 60px #ff2d7822;max-width:96vw;max-height:92vh}
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+<script>
+"use strict";
+// USDC STACK — built from a single prompt by an AI agent for make.fun.
+// A ghost catches falling USDC coins and stacks them into a tower on its head.
+// Seeded RNG so every run is reproducible; window.USDCSTACK exposes the
+// state machine for headless simulation (same code path as the live game).
+(function(){
+  var W=960,H=540,GROUND=500;
+  var seed=20261124;
+  function rnd(){ seed=(seed*1103515245+12345)&0x7fffffff; return seed/0x7fffffff; }
+  function clamp(v,a,b){ return v<a?a:v>b?b:v; }
+  // Tower height compresses as it grows so it never leaves the screen.
+  function towerH(n){ return n<=12 ? n*13 : 156+(n-12)*6; }
+  function towerY(i){ return i<12 ? i*13 : 156+(i-12)*6; }
+
+  var state={
+    phase:"title",           // title | playing | over
+    t:0, timeLeft:60, score:0, combo:0, best:0,
+    lives:3, stack:0, wobble:0, wobbleT:0,
+    ghost:{x:W/2, vx:0, targetX:null},
+    coins:[], parts:[], spawnT:0, msg:"", msgT:0,
+    caught:0, missed:0
+  };
+  function spawnCoin(){
+    state.coins.push({x:60+rnd()*(W-120), y:-30, vy:150+rnd()*90+state.stack*4,
+      r:22, spin:rnd()*6.28, kind: rnd()<0.12 ? "big":"coin"});
+  }
+  function reset(){
+    seed=20261124;
+    state.phase="playing"; state.t=0; state.timeLeft=60; state.score=0;
+    state.combo=0; state.best=0; state.lives=3; state.stack=0;
+    state.wobble=0; state.wobbleT=0; state.coins=[]; state.parts=[];
+    state.spawnT=0; state.msg=""; state.msgT=0; state.caught=0; state.missed=0;
+    state.ghost.x=W/2; state.ghost.vx=0; state.ghost.targetX=null;
+    spawnCoin(); spawnCoin();
+  }
+  function burst(x,y,color,n){
+    for(var i=0;i<n;i++) state.parts.push({x:x,y:y,vx:(rnd()-0.5)*260,vy:-40-rnd()*180,
+      life:0.6+rnd()*0.4, color:color, r:3+rnd()*4});
+  }
+  // One fixed step of the real game. dt in seconds.
+  function step(dt){
+    state.t+=dt;
+    if(state.phase!=="playing"){ return; }
+    state.timeLeft-=dt;
+    if(state.timeLeft<=0){ state.timeLeft=0; state.phase="over"; state.best=Math.max(state.best,state.score); return; }
+    var g=state.ghost;
+    if(g.targetX!==null){ g.x+=(g.targetX-g.x)*Math.min(1,dt*14); }
+    g.x+=g.vx*dt; g.vx*=Math.pow(0.001,dt); g.x=clamp(g.x,50,W-50);
+    state.spawnT-=dt;
+    if(state.spawnT<=0){ spawnCoin(); state.spawnT=Math.max(0.28, 0.85-state.stack*0.02-rnd()*0.25); }
+    var headY=GROUND-78-towerH(state.stack); // top of the tower
+    var i,c;
+    for(i=state.coins.length-1;i>=0;i--){
+      c=state.coins[i]; c.y+=c.vy*dt; c.spin+=dt*4;
+      var dx=c.x-g.x;
+      if(c.y+ c.r>=headY-8 && c.y<headY+26 && Math.abs(dx)<62){
+        // caught on the tower
+        state.coins.splice(i,1);
+        state.stack++; state.caught++;
+        state.combo++;
+        var pts=(c.kind==="big"?5:1)+(state.combo>=3?1:0);
+        state.score+=pts;
+        state.msg=(c.kind==="big"?"BIG COIN +5!":(state.combo>=3?"COMBO x"+state.combo+"!":"+"+pts));
+        state.msgT=0.9;
+        state.wobble=Math.min(10,state.wobble+2); state.wobbleT=0.4;
+        burst(c.x,headY,"#ffd34d",10);
+        continue;
+      }
+      if(c.y>GROUND+20){
+        state.coins.splice(i,1);
+        state.missed++; state.combo=0; state.lives--;
+        state.wobble=16; state.wobbleT=0.9;
+        state.msg="MISS!"; state.msgT=0.9;
+        burst(c.x,GROUND,"#ff2d78",8);
+        if(state.lives<=0){ state.phase="over"; state.best=Math.max(state.best,state.score); }
+      }
+    }
+    if(state.wobbleT>0){ state.wobbleT-=dt; if(state.wobbleT<=0) state.wobble*=0.3; }
+    if(state.msgT>0) state.msgT-=dt;
+    for(i=state.parts.length-1;i>=0;i--){ var p=state.parts[i];
+      p.life-=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=420*dt;
+      if(p.life<=0) state.parts.splice(i,1); }
+  }
+
+  // ---- drawing ----
+  var cv=document.getElementById("game"), ctx=cv.getContext("2d");
+  function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+  function drawCoin(c){
+    ctx.save(); ctx.translate(c.x,c.y); ctx.rotate(Math.sin(c.spin)*0.25);
+    var r=c.kind==="big"?27:22;
+    ctx.fillStyle="#f5a623"; ctx.beginPath(); ctx.arc(0,0,r,0,6.29); ctx.fill();
+    ctx.fillStyle="#ffd34d"; ctx.beginPath(); ctx.arc(0,0,r-5,0,6.29); ctx.fill();
+    ctx.fillStyle="#b97d0e"; ctx.font="bold "+(r+2)+"px system-ui,sans-serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText("$",0,1);
+    ctx.restore();
+  }
+  function drawGhost(){
+    var g=state.ghost, sway=Math.sin(state.t*2.2)*3;
+    var tilt=state.wobble>1 ? Math.sin(state.t*22)*state.wobble*0.35 : 0;
+    var topY=GROUND-78;
+    ctx.save(); ctx.translate(g.x, topY+sway*0.3); ctx.rotate(tilt*0.02);
+    // tower of stacked coins on the ghost's head
+    for(var i=0;i<state.stack;i++){
+      var cy=-58-towerY(i), lean=Math.sin(state.t*3+i*0.7)*state.wobble*0.5;
+      ctx.save(); ctx.translate(lean,cy);
+      ctx.fillStyle="#f5a623"; rr(-26,-7,52,13,6); ctx.fill();
+      ctx.fillStyle="#ffd34d"; rr(-26,-7,52,6,3); ctx.fill();
+      ctx.fillStyle="#b97d0e"; ctx.font="bold 11px system-ui,sans-serif";
+      ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText("$",0,0);
+      ctx.restore();
+    }
+    // ghost body
+    ctx.fillStyle="#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(-34,10);
+    ctx.lineTo(-34,-28); ctx.arc(0,-28,34,Math.PI,0);
+    ctx.lineTo(34,10);
+    var k;
+    for(k=0;k<3;k++){ ctx.arc(34-11.33*(2*k+1)+11.33,10,11.33,0,Math.PI); }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle="#14101a";
+    ctx.beginPath(); ctx.arc(-12,-30,5,0,6.29); ctx.arc(12,-30,5,0,6.29); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(0,-16,6,8,0,0,6.29); ctx.fill();
+    ctx.restore();
+  }
+  function draw(){
+    // sky
+    var sky=ctx.createLinearGradient(0,0,0,H);
+    sky.addColorStop(0,"#241145"); sky.addColorStop(1,"#12081f");
+    ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+    // stars
+    ctx.fillStyle="#ffffff";
+    for(var s=0;s<40;s++){ var sx=(s*173)%W, sy=(s*97)%260;
+      ctx.globalAlpha=0.25+0.2*Math.sin(state.t*2+s); ctx.fillRect(sx,sy,2,2); }
+    ctx.globalAlpha=1;
+    // moon / USDC sun
+    ctx.fillStyle="#ffd34d"; ctx.beginPath(); ctx.arc(830,70,34,0,6.29); ctx.fill();
+    ctx.fillStyle="#b97d0e"; ctx.font="bold 30px system-ui,sans-serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText("$",830,71);
+    // ground
+    ctx.fillStyle="#2c1747"; ctx.fillRect(0,GROUND,W,H-GROUND);
+    ctx.fillStyle="#ff2d78"; ctx.fillRect(0,GROUND,W,4);
+    var i;
+    for(i=0;i<state.coins.length;i++) drawCoin(state.coins[i]);
+    for(i=0;i<state.parts.length;i++){ var p=state.parts[i];
+      ctx.globalAlpha=Math.max(0,p.life); ctx.fillStyle=p.color;
+      ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,6.29); ctx.fill(); }
+    ctx.globalAlpha=1;
+    drawGhost();
+    // HUD
+    ctx.fillStyle="#ffffff"; ctx.textAlign="left"; ctx.textBaseline="alphabetic";
+    ctx.font="bold 26px system-ui,sans-serif";
+    ctx.fillText("USDC STACK", 18, 38);
+    ctx.font="bold 44px system-ui,sans-serif";
+    ctx.fillText(""+state.score, 18, 88);
+    ctx.font="16px system-ui,sans-serif"; ctx.fillStyle="#ffd34d";
+    ctx.fillText("TOWER  "+state.stack+"  •  COMBO x"+state.combo, 18, 112);
+    ctx.textAlign="right"; ctx.fillStyle="#ffffff"; ctx.font="bold 30px system-ui,sans-serif";
+    ctx.fillText(Math.ceil(state.timeLeft)+"s", W-18, 44);
+    ctx.font="20px system-ui,sans-serif"; ctx.fillStyle="#ff5c8a";
+    ctx.fillText("♥".repeat(Math.max(0,state.lives))+"♡".repeat(Math.max(0,3-state.lives)), W-18, 74);
+    if(state.msgT>0){ ctx.textAlign="center"; ctx.globalAlpha=Math.min(1,state.msgT*2);
+      ctx.fillStyle="#ffd34d"; ctx.font="bold 34px system-ui,sans-serif";
+      ctx.fillText(state.msg, W/2, 160); ctx.globalAlpha=1; }
+    if(state.phase==="title"){
+      ctx.fillStyle="rgba(10,5,20,0.72)"; ctx.fillRect(0,0,W,H);
+      ctx.textAlign="center"; ctx.fillStyle="#ffffff";
+      ctx.font="bold 64px system-ui,sans-serif";
+      ctx.fillText("USDC STACK", W/2, 200);
+      ctx.fillStyle="#ffd34d"; ctx.font="bold 26px system-ui,sans-serif";
+      ctx.fillText("Catch the coins. Stack the tower. Don't drop it.", W/2, 250);
+      ctx.fillStyle="#ffffff"; ctx.font="22px system-ui,sans-serif";
+      ctx.fillText("← → or mouse to move  •  60 seconds  •  3 misses and it topples", W/2, 300);
+      ctx.fillStyle="#ff2d78"; rr(W/2-130,340,260,56,28); ctx.fill();
+      ctx.fillStyle="#ffffff"; ctx.font="bold 24px system-ui,sans-serif";
+      ctx.fillText("CLICK / SPACE TO PLAY", W/2, 376);
+      ctx.fillStyle="#9b8bb5"; ctx.font="16px system-ui,sans-serif";
+      ctx.fillText("made from ONE prompt by an AI agent — make.fun", W/2, 440);
+    }
+    if(state.phase==="over"){
+      ctx.fillStyle="rgba(10,5,20,0.78)"; ctx.fillRect(0,0,W,H);
+      ctx.textAlign="center"; ctx.fillStyle="#ffffff";
+      ctx.font="bold 56px system-ui,sans-serif";
+      ctx.fillText(state.lives<=0?"TOWER TOPPLED!":"TIME!", W/2, 200);
+      ctx.fillStyle="#ffd34d"; ctx.font="bold 40px system-ui,sans-serif";
+      ctx.fillText("SCORE  "+state.score+"   •   TOWER  "+state.stack, W/2, 270);
+      ctx.fillStyle="#ffffff"; ctx.font="22px system-ui,sans-serif";
+      ctx.fillText("Caught "+state.caught+" coins  •  Best "+state.best, W/2, 320);
+      ctx.fillStyle="#ff2d78"; rr(W/2-130,360,260,56,28); ctx.fill();
+      ctx.fillStyle="#ffffff"; ctx.font="bold 24px system-ui,sans-serif";
+      ctx.fillText("PLAY AGAIN  (R)", W/2, 396);
+    }
+  }
+  var last=0;
+  function loop(ts){
+    var dt=Math.min(0.05,(ts-last)/1000||0.016); last=ts;
+    step(dt); draw();
+    requestAnimationFrame(loop);
+  }
+  // input
+  var keys={};
+  document.addEventListener("keydown",function(e){
+    keys[e.key]=true;
+    if(e.key==="ArrowLeft") state.ghost.vx=-520;
+    if(e.key==="ArrowRight") state.ghost.vx=520;
+    if(e.key===" "||e.key==="Enter"){
+      if(state.phase!=="playing") reset();
+      e.preventDefault();
+    }
+    if(e.key==="r"||e.key==="R"){ if(state.phase==="over") reset(); }
+  });
+  document.addEventListener("keyup",function(e){ keys[e.key]=false; });
+  cv.addEventListener("mousemove",function(e){
+    var r=cv.getBoundingClientRect();
+    state.ghost.targetX=(e.clientX-r.left)/r.width*W;
+  });
+  cv.addEventListener("mousedown",function(){
+    if(state.phase!=="playing") reset();
+  });
+  window.USDCSTACK={state:state, step:step, reset:reset, W:W, H:H, GROUND:GROUND};
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
